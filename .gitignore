@@ -1,0 +1,91 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+env/
+venv/
+.venv/
+ENV/
+
+
+# =========================
+# IDE / Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.netrwhist
+
+
+# =========================
+# Python tooling
+# =========================
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+
+# =========================
+# Project data
+# =========================
+
+# Ignore everything inside data/
+data/*
+
+# But keep Python utility scripts
+!data/*.py
+
+# Keep placeholder if we ever need it
+!data/.gitkeep
+
+
+# =========================
+# Large data files
+# =========================
+*.zip
+*.tif
+*.tiff
+*.hgt
+*.hgt.gz
+
+
+# =========================
+# Generated outputs
+# =========================
+outputs/
+
+
+# =========================
+# Model checkpoints
+# =========================
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+
+# =========================
+# Logs
+# =========================
+*.log
+
+
+# =========================
+# Secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
