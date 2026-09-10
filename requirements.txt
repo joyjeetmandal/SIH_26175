@@ -7,3 +7,8 @@ Pillow
 scikit-learn
 matplotlib
 tqdm
+fastapi
+uvicorn
+python-multipart
+spicy
+attrs
