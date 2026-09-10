@@ -1959,6 +1959,13 @@ def run_pipeline(
 
     print()
 
+    return {
+    "run_dir": str(run_dir),
+    "heightmap": str(heightmap_png_path),
+    "texture": str(texture_path),
+    "metadata": str(metadata_path)
+}
+
 
 # ============================================================
 # COMMAND LINE
@@ -1978,7 +1985,6 @@ def parse_arguments():
     )
 
     return parser.parse_args()
-
 
 def main():
 

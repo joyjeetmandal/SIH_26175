@@ -1,0 +1,347 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+
+:root {
+  --ink: #12181f;
+  --surface: #1a232c;
+  --surface-2: #212d38;
+  --line: #2e3b47;
+  --line-soft: #23303b;
+  --text: #e7ecf0;
+  --text-muted: #8291a0;
+  --elev-low: #3e7c6f;
+  --elev-mid: #c99a4b;
+  --elev-high: #e8dcc8;
+  --radius: 6px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--text);
+  font-family: "IBM Plex Sans", -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 28px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  position: relative;
+}
+
+.header::before {
+  content: "";
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border: 1px solid var(--elev-mid);
+  border-radius: 50%;
+  position: relative;
+  box-shadow: inset 0 0 0 3px var(--surface);
+}
+
+.header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    var(--elev-low),
+    var(--elev-mid) 45%,
+    var(--elev-high)
+  );
+  opacity: 0.7;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.main-container {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  min-height: 0;
+}
+
+@media (max-width: 760px) {
+  .main-container {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.upload-button {
+  width: 100%;
+  padding: 22px 16px;
+  background: transparent;
+  border: 1.5px dashed var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.upload-button:hover {
+  border-color: var(--elev-mid);
+  color: var(--elev-high);
+  background: rgba(201, 154, 75, 0.06);
+}
+
+.upload-button:focus-visible {
+  outline: 2px solid var(--elev-mid);
+  outline-offset: 2px;
+}
+
+.panel {
+  padding-top: 20px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.panel:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.panel h2 {
+  margin: 0 0 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.panel label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  font-size: 14px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.panel input[type="radio"] {
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  flex: none;
+  border: 1.5px solid var(--line);
+  border-radius: 50%;
+  margin: 0;
+  position: relative;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.panel input[type="radio"]:checked {
+  border-color: var(--elev-mid);
+}
+
+.panel input[type="radio"]:checked::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--elev-mid);
+}
+
+.panel input[type="radio"]:focus-visible {
+  outline: 2px solid var(--elev-mid);
+  outline-offset: 2px;
+}
+
+.analysis-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 0;
+  font-size: 13.5px;
+  flex-wrap: nowrap;
+}
+
+.analysis-item span {
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  align-items: baseline;
+}
+
+.analysis-item span::after {
+  content: "";
+  display: inline-block;
+  width: 100%;
+  margin: 0 8px;
+  border-bottom: 1px dotted var(--line);
+  transform: translateY(-4px);
+}
+
+.analysis-item strong {
+  font-family: "IBM Plex Mono", monospace;
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.visualization {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.visualization h2 {
+  margin: 0;
+  padding: 18px 24px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.visualization-box {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--ink);
+}
+
+.terrain-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.terrain-grid {
+  display: none;
+}
+
+.terrain-placeholder span {
+  width: 360px;
+  padding: 45px 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  border: 1.5px dashed var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  font-size: 13.5px;
+  color: var(--text-muted);
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.terrain-placeholder span:hover {
+  border-color: var(--elev-mid);
+  background: rgba(201, 154, 75, 0.04);
+}
+
+.resolution {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 14px 24px;
+  border-top: 1px dashed var(--line);
+  background: var(--surface);
+}
+
+.resolution span:first-child {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.resolution span:last-child {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 13px;
+  color: var(--elev-high);
+}
+
+@media (max-width: 760px) {
+  .sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .visualization-box {
+    min-height: 450px;
+  }
+}
+
+@media (max-width: 550px) {
+  .header {
+    padding: 16px 20px;
+  }
+
+  .header h1 {
+    font-size: 17px;
+  }
+
+  .sidebar {
+    padding: 18px;
+  }
+
+  .visualization h2 {
+    padding: 16px 18px;
+  }
+
+  .resolution {
+    padding: 13px 18px;
+  }
+
+  .terrain-placeholder span {
+    width: calc(100% - 40px);
+  }
+}
