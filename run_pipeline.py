@@ -1,50 +1,3 @@
-#!/usr/bin/env python3
-
-"""
-SIH 26175 - Automated Terrain Reconstruction Pipeline
-
-Supported input:
-    JPG
-    JPEG
-    PNG
-    GeoTIFF
-    ZIP containing Sentinel-2 B02/B03/B04 GeoTIFFs
-    Folder containing Sentinel-2 B02/B03/B04 GeoTIFFs
-
-Pipeline:
-
-    INPUT
-      ↓
-    Automatic detection
-      ↓
-    RGB preparation
-      ↓
-    Depth Anything V2 + GAMUS-5004
-      ↓
-    Height / AGL prediction
-      ↓
-    If georeferenced:
-        ↓
-        SRTM download
-        ↓
-        SRTM alignment
-        ↓
-        Provisional DSM
-      ↓
-    Three.js-ready outputs
-
-Current provisional DSM:
-
-    DSM = SRTM + predicted_height
-
-Negative values are currently clipped to 0 m.
-
-IMPORTANT:
-    The DSM is still PROVISIONAL.
-    GAMUS target semantics and vertical datum need to be
-    scientifically verified after the SIH demo.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -61,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
 from rasterio.merge import merge
@@ -350,9 +304,6 @@ def make_uint8_rgb(
 def validate_sentinel_band_files(
     band_paths: dict,
 ):
-    """
-    Validate that B02/B03/B04 have matching spatial grids.
-    """
 
     required = {
         "B02",
@@ -1533,6 +1484,149 @@ def save_texture(
 
 
 # ============================================================
+# 3D TERRAIN VISUALIZATION
+# ============================================================
+
+
+def launch_3d_visualization(
+    heightmap_path: Path,
+    output_path=None,
+):
+    """
+    Render the generated heightmap as a 3D terrain surface.
+    """
+
+    section("3D TERRAIN VISUALIZATION")
+
+    if not heightmap_path.exists():
+        warning(
+            f"Heightmap not found; skipping 3D visualization: "
+            f"{heightmap_path}"
+        )
+        return
+
+    try:
+        heightmap = np.load(heightmap_path)
+    except Exception as exc:
+        warning(f"Could not load heightmap: {exc}")
+        return
+
+    if heightmap.ndim != 2:
+        warning(
+            f"Expected a 2D heightmap, got shape {heightmap.shape}; "
+            "skipping 3D visualization."
+        )
+        return
+
+    if not np.isfinite(heightmap).any():
+        warning(
+            "Heightmap contains no finite elevation values; "
+            "skipping 3D visualization."
+        )
+        return
+
+    visualization_heightmap = heightmap.astype(
+        np.float32,
+        copy=True,
+    )
+
+    finite_values = visualization_heightmap[
+        np.isfinite(visualization_heightmap)
+    ]
+
+    median_value = float(np.median(finite_values))
+
+    visualization_heightmap[
+        ~np.isfinite(visualization_heightmap)
+    ] = median_value
+
+    # Downsample only for visualization.
+    # The original heightmap.npy remains unchanged.
+    max_dimension = 350
+
+    height, width = visualization_heightmap.shape
+
+    if max(height, width) > max_dimension:
+        scale = max_dimension / max(height, width)
+
+        new_width = max(2, int(width * scale))
+        new_height = max(2, int(height * scale))
+
+        visualization_heightmap = cv2.resize(
+            visualization_heightmap,
+            (new_width, new_height),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    visual_height, visual_width = visualization_heightmap.shape
+
+    x = np.arange(visual_width)
+    y = np.arange(visual_height)
+
+    X, Y = np.meshgrid(x, y)
+
+    # Create 3D figure
+    fig = plt.figure(figsize=(12, 8))
+
+    ax = fig.add_subplot(
+        111,
+        projection="3d",
+    )
+
+    surface = ax.plot_surface(
+        X,
+        Y,
+        visualization_heightmap,
+        cmap="jet",
+        linewidth=0,
+        antialiased=True,
+    )
+
+    # Axis labels
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Elevation")
+
+    ax.set_title(
+        "SIH 26175 Terrain Reconstruction"
+    )
+
+    # Color bar
+    fig.colorbar(
+        surface,
+        ax=ax,
+        shrink=0.6,
+        pad=0.1,
+        label="Elevation",
+    )
+
+    fig.tight_layout()
+
+    # Save PNG if requested
+    if output_path is not None:
+        try:
+            fig.savefig(
+                output_path,
+                dpi=150,
+                bbox_inches="tight",
+            )
+
+            success(
+                f"3D visualization saved: {output_path}"
+            )
+
+        except Exception as exc:
+            warning(
+                f"Could not save 3D visualization: {exc}"
+            )
+
+    # Show interactive 3D viewer
+    plt.show()
+
+    plt.close(fig)
+
+
+# ============================================================
 # MAIN PIPELINE
 # ============================================================
 
@@ -1955,16 +2049,19 @@ def run_pipeline(
 
     print()
 
+    # --------------------------------------------------------
+    # 3D visualization
+    # --------------------------------------------------------
+    visualization_path = run_dir / "terrain_3d.png"
+    launch_3d_visualization(
+        heightmap_path=run_dir / "heightmap.npy",
+        output_path=visualization_path,
+    )
+
+    print()
     print("Ready for Three.js reconstruction.")
 
     print()
-
-    return {
-    "run_dir": str(run_dir),
-    "heightmap": str(heightmap_png_path),
-    "texture": str(texture_path),
-    "metadata": str(metadata_path)
-}
 
 
 # ============================================================
@@ -1985,6 +2082,7 @@ def parse_arguments():
     )
 
     return parser.parse_args()
+
 
 def main():
 
@@ -2029,3 +2127,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

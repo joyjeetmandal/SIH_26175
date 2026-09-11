@@ -35,8 +35,8 @@ function App() {
 
       setTextureUrl(
         `${backendUrl}${data.results.texture}`
-    );
-  }
+        );
+      }
     } catch (error) {
       console.error("Error:", error);
       alert("Could not connect to API");
@@ -49,7 +49,7 @@ function App() {
     <div className="app">
 
       <header className="header">
-        <h1>DepthWizard-TerraVision</h1>
+        <h1>DepthWizard - TerraVision</h1>
       </header>
 
       <main className="main-container">
@@ -112,8 +112,6 @@ function App() {
               <strong>
                 {loading
                   ? "..."
-                  : result
-                  ? `${result.height} m`
                   : "-- m"}
               </strong>
             </div>
@@ -121,24 +119,20 @@ function App() {
             <div className="analysis-item">
               <span>Slope</span>
 
-              <strong>
+                <strong>
                 {loading
                   ? "..."
-                  : result
-                  ? `${result.slope}°`
                   : "--°"}
-              </strong>
-            </div>
+                </strong>
+              </div>
 
-            <div className="analysis-item">
-              <span>Coordinates</span>
+              <div className="analysis-item">
+                <span>Coordinates</span>
 
-              <strong>
-                {result
-                  ? result.coordinates
-                  : "--"}
-              </strong>
-            </div>
+                <strong>
+                   --
+                </strong>
+              </div>
           </section>
 
         </aside>
@@ -147,25 +141,66 @@ function App() {
 
           <h2>3D Visualization</h2>
 
-          <div className="visualization-box">
+         <div className="visualization-box">
 
+          {!selectedFile ? (
             <div className="terrain-placeholder">
-
               <div className="terrain-grid"></div>
 
               <span>
-                {!selectedFile
-                  ? "Upload an image to generate terrain"
-                  : loading
-                  ? "Analyzing image..."
-                  : result?.success
-                  ? "AI processing completed"
-                  : "Image processed successfully"}
+                Upload an image to generate terrain
               </span>
+            </div>
+
+          ) : loading ? (
+
+            <div className="terrain-placeholder">
+              <div className="terrain-grid"></div>
+
+              <span>
+                Analyzing image...
+              </span>
+            </div>
+
+          ) : result?.success ? (
+
+            <div className="results-container">
+
+              <div className="result-image">
+                <h3>Generated Heightmap</h3>
+
+                {heightmapUrl && (
+                  <img
+                    src={heightmapUrl}
+                    alt="Generated heightmap"
+                  />
+                 )}
+                </div>
+
+                <div className="result-image">
+                  <h3>Texture</h3>
+
+                  {textureUrl && (
+                    <img
+                      src={textureUrl}
+                      alt="Generated terrain texture"
+                    />
+                  )}
+                </div>
 
             </div>
 
-          </div>
+          ) : (
+
+            <div className="terrain-placeholder">
+              <span>
+                Processing failed
+              </span>
+            </div>
+
+          )}
+
+        </div>
 
           <div className="resolution">
 
