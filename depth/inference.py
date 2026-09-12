@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+from contextlib import nullcontext
 
 import cv2
 import numpy as np
@@ -8,13 +9,11 @@ import torch
 import torch.nn.functional as F
 import rasterio
 
-
 # ============================================================
 # PATH SETUP
 # ============================================================
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
 DEPTH_ANYTHING_ROOT = os.path.join(PROJECT_ROOT, "models", "Depth-Anything-V2")
 
 sys.path.insert(0, PROJECT_ROOT)
@@ -22,9 +21,8 @@ sys.path.insert(0, DEPTH_ANYTHING_ROOT)
 
 from depth_anything_v2.dpt import DepthAnythingV2
 
-
 # ============================================================
-# MODEL CONFIGURATION
+# BACKWARD-COMPATIBLE PUBLIC CONSTANTS
 # ============================================================
 
 MODEL_CONFIG = {
@@ -37,121 +35,229 @@ MODEL_CONFIG = {
 
 ENCODER = "vits"
 
-# Change this if your downloaded checkpoint has a different name/location.
 CHECKPOINT = os.path.join(
     PROJECT_ROOT, "models", "depth_anything_v2_gamus_5004_best.pth"
 )
 
+# IMPORTANT:
+# run_pipeline.py imports INPUT_SIZE from this module.
+# Keep this symbol even though the new inference path uses the crop size
+# stored inside the trained artifact whenever available.
 INPUT_SIZE = 518
-
-
-# ============================================================
-# DEVICE
-# ============================================================
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+DEFAULT_NORMALIZATION = {
+    "mean": [0.485, 0.456, 0.406],
+    "std": [0.229, 0.224, 0.225],
+}
+
+# Active metadata is populated by load_model() so the old API:
+#     model, scale, shift = load_model()
+#     pred = predict(model, image, scale, shift)
+# continues to work unchanged.
+_ACTIVE = {
+    "transform": {"mode": "direct"},
+    "mean": np.asarray(DEFAULT_NORMALIZATION["mean"], dtype=np.float32),
+    "std": np.asarray(DEFAULT_NORMALIZATION["std"], dtype=np.float32),
+    "crop_size": INPUT_SIZE,
+    "overlap": 0.25,
+    "rgb_divisor": 255.0,
+    "tta": False,
+}
 
 # ============================================================
-# LOAD MODEL
+# CHECKPOINT HELPERS
 # ============================================================
 
+def _safe_torch_load(path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def _strip_module_prefix(state_dict):
+    cleaned = {}
+    for key, value in state_dict.items():
+        if key.startswith("module."):
+            key = key[len("module."):]
+        cleaned[key] = value
+    return cleaned
+
+
+def _decode_height(z, transform):
+    z = z.float()
+    mode = transform.get("mode", "direct")
+
+    if mode == "log1p":
+        limit = float(transform.get("log_inverse_numerical_limit", 30.0))
+        return torch.expm1(z.clamp(max=limit))
+
+    if mode == "normalized":
+        return z * float(transform["scale_m"])
+
+    if mode == "direct":
+        return z
+
+    raise RuntimeError(f"Unsupported saved target transform: {mode}")
+
+
+# ============================================================
+# TRAINED DEPTHWIZARD HEIGHT MODEL
+# ============================================================
+
+class DepthWizardHeightModel(torch.nn.Module):
+    """
+    Matches the GAMUS fine-tuned model rather than vanilla DA-V2 inference.
+    """
+
+    def __init__(self, model_config):
+        super().__init__()
+        self.model_config = dict(model_config)
+        self.net = DepthAnythingV2(**self.model_config)
+
+        # Match training/export: remove vanilla DA-V2's final activation layer.
+        self.net.depth_head.scratch.output_conv2[3] = torch.nn.Identity()
+
+    def forward(self, x):
+        h, w = x.shape[-2:]
+
+        pad_h = (-h) % 14
+        pad_w = (-w) % 14
+        x_pad = F.pad(x, (0, pad_w, 0, pad_h), mode="replicate")
+
+        encoder = self.model_config["encoder"]
+
+        features = self.net.pretrained.get_intermediate_layers(
+            x_pad,
+            self.net.intermediate_layer_idx[encoder],
+            return_class_token=True,
+        )
+
+        logits = self.net.depth_head(
+            features,
+            x_pad.shape[-2] // 14,
+            x_pad.shape[-1] // 14,
+        )
+
+        # Same positive-height parameterization used by the trained model.
+        height_latent = F.softplus(logits.float())
+
+        return height_latent[..., :h, :w]
+
+
+# ============================================================
+# LOAD MODEL — OLD API PRESERVED
+# ============================================================
 
 def load_model():
+    """
+    Backward-compatible return signature:
+        model, scale, shift = load_model()
+
+    `scale` and `shift` are retained only so the existing run_pipeline.py
+    does not need to change. The new DepthWizard artifact uses its saved
+    target transform instead.
+    """
+    global _ACTIVE
+
     print("=" * 60)
-    print("LOADING GAMUS FINE-TUNED MODEL")
+    print("LOADING GAMUS FINE-TUNED DEPTHWIZARD MODEL")
     print("=" * 60)
 
     if not os.path.isfile(CHECKPOINT):
         raise FileNotFoundError(
             f"\nCheckpoint not found:\n{CHECKPOINT}\n\n"
-            "Put the downloaded GAMUS checkpoint at this location "
-            "or change CHECKPOINT in this file."
+            "Put the trained GAMUS checkpoint at this location "
+            "or change CHECKPOINT in depth/inference.py."
         )
 
     print("Checkpoint:", CHECKPOINT)
     print("Device:", DEVICE)
 
-    model = DepthAnythingV2(**MODEL_CONFIG[ENCODER])
+    artifact = _safe_torch_load(CHECKPOINT)
 
-    checkpoint = torch.load(CHECKPOINT, map_location="cpu")
+    if not isinstance(artifact, dict):
+        raise RuntimeError(
+            "Expected a DepthWizard checkpoint/artifact dictionary, "
+            "not a bare vanilla DA-V2 state_dict."
+        )
 
-    # --------------------------------------------------------
-    # Extract model state dictionary
-    # --------------------------------------------------------
+    if "model" not in artifact:
+        raise RuntimeError(
+            "Checkpoint does not contain a 'model' key. "
+            f"Top-level keys: {list(artifact.keys())[:40]}"
+        )
 
-    if "model_state_dict" in checkpoint:
-        state_dict = checkpoint["model_state_dict"]
+    model_config = artifact.get("model_config", MODEL_CONFIG[ENCODER])
+    transform = artifact.get("transform", {"mode": "direct"})
+    normalization = artifact.get("normalization", DEFAULT_NORMALIZATION)
+    saved_config = artifact.get("config", {})
 
-    elif "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
+    state_dict = _strip_module_prefix(artifact["model"])
 
-    elif "model" in checkpoint:
-        state_dict = checkpoint["model"]
+    # Training wrapper saves keys as net.pretrained..., net.depth_head...
+    # If an export contains only the inner model, wrap those keys back.
+    if state_dict and not any(k.startswith("net.") for k in list(state_dict.keys())[:30]):
+        state_dict = {f"net.{k}": v for k, v in state_dict.items()}
 
-    else:
-        state_dict = checkpoint
+    model = DepthWizardHeightModel(model_config)
 
-    # --------------------------------------------------------
-    # Remove "module." prefix if checkpoint was trained
-    # using DataParallel.
-    # --------------------------------------------------------
+    try:
+        info = model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as exc:
+        print("\nFirst checkpoint keys:")
+        for key in list(state_dict.keys())[:20]:
+            print(" ", key)
+        raise RuntimeError(
+            "Checkpoint/model architecture mismatch. "
+            "This GAMUS model must be loaded through the DepthWizard height wrapper.\n"
+            + str(exc)
+        ) from exc
 
-    cleaned_state_dict = {}
+    count = sum(p.numel() for p in model.parameters())
+    if not 22_000_000 < count < 28_000_000:
+        raise RuntimeError(
+            f"Unexpected model parameter count: {count:,}. "
+            "Expected Depth Anything V2 Small."
+        )
 
-    for key, value in state_dict.items():
-        if key.startswith("module."):
-            key = key[len("module.") :]
+    _ACTIVE = {
+        "transform": transform,
+        "mean": np.asarray(normalization["mean"], dtype=np.float32),
+        "std": np.asarray(normalization["std"], dtype=np.float32),
+        "crop_size": int(artifact.get("crop_size", saved_config.get("CROP_SIZE", INPUT_SIZE))),
+        "overlap": float(saved_config.get("TILE_OVERLAP", 0.25)),
+        "rgb_divisor": float(saved_config.get("RGB_DIVISOR", 255.0)),
+        "tta": bool(artifact.get("final_tta", False)),
+    }
 
-        cleaned_state_dict[key] = value
+    model = model.to(DEVICE).eval()
+    model.requires_grad_(False)
 
-    model.load_state_dict(cleaned_state_dict, strict=True)
+    print("Strict load:", info)
+    print(f"Parameters: {count:,}")
+    print("Saved target transform:", _ACTIVE["transform"])
+    print("Saved tile/crop size:", _ACTIVE["crop_size"])
+    print("Saved overlap:", _ACTIVE["overlap"])
+    print("Saved TTA:", _ACTIVE["tta"])
+    print("Model loaded successfully.\n")
 
-    # --------------------------------------------------------
-    # Load learned scale and shift
-    # --------------------------------------------------------
+    # Compatibility only. predict() intentionally does NOT use these
+    # legacy scale/shift values for the new model.
+    scale = 1.0
+    shift = 0.0
 
-    scale = checkpoint.get("scale", 1.0)
-    shift = checkpoint.get("shift", 0.0)
-
-    if torch.is_tensor(scale):
-        scale = scale.item()
-
-    if torch.is_tensor(shift):
-        shift = shift.item()
-
-    print("Learned scale:", scale)
-    print("Learned shift:", shift)
-
-    model = model.to(DEVICE)
-    model.eval()
-
-    print("Model loaded successfully.")
-    print()
-
-    return model, float(scale), float(shift)
+    return model, scale, shift
 
 
 # ============================================================
-# IMAGE LOADING
+# IMAGE LOADING — OLD API PRESERVED
 # ============================================================
-
 
 def load_image(image_path):
-    """
-    Load JPG/PNG/TIFF.
-
-    Returns:
-        image_rgb : H x W x 3 uint8
-        metadata  : Rasterio metadata if input is GeoTIFF
-                    otherwise None
-    """
-
     extension = os.path.splitext(image_path)[1].lower()
-
-    # --------------------------------------------------------
-    # GeoTIFF
-    # --------------------------------------------------------
 
     if extension in [".tif", ".tiff"]:
         with rasterio.open(image_path) as src:
@@ -160,169 +266,183 @@ def load_image(image_path):
             print("Input size:", src.width, "x", src.height)
             print("Input bands:", src.count)
 
-            if src.count >= 3:
-                # Read first three bands
-                image = src.read([1, 2, 3])
+            if src.count < 3:
+                raise ValueError("GeoTIFF must contain at least 3 bands for RGB inference.")
 
-                # CHW -> HWC
-                image = np.transpose(image, (1, 2, 0))
-
-            else:
-                raise ValueError(
-                    "GeoTIFF must contain at least 3 bands for RGB inference."
-                )
-
+            image = src.read([1, 2, 3])
+            image = np.transpose(image, (1, 2, 0))
             metadata = src.meta.copy()
 
-        # Convert to uint8 if necessary
-        if image.dtype != np.uint8:
-            image = image.astype(np.float32)
-
-            min_value = np.nanmin(image)
-            max_value = np.nanmax(image)
-
-            if max_value > min_value:
-                image = (image - min_value) / (max_value - min_value) * 255.0
-
-            image = np.clip(image, 0, 255).astype(np.uint8)
-
         return image, metadata
-
-    # --------------------------------------------------------
-    # JPG / PNG / other OpenCV-supported images
-    # --------------------------------------------------------
 
     image = cv2.imread(image_path, cv2.IMREAD_COLOR)
 
     if image is None:
         raise FileNotFoundError(f"Could not read image:\n{image_path}")
 
-    # OpenCV gives BGR.
-    # Convert to RGB.
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
     return image, None
 
 
 # ============================================================
-# PREPROCESSING
+# PREPROCESS — OLD PUBLIC FUNCTION PRESERVED
 # ============================================================
-
 
 def preprocess(image):
     """
-    Exactly matches the important preprocessing used
-    during GAMUS training.
+    Kept because existing code may import preprocess().
 
-    Training:
-        HWC -> CHW
-        float
-        /255 if necessary
-        resize to 518x518
+    For best/final predictions, use predict(), which performs the exact
+    native-resolution tiled preprocessing used by validation/test.
     """
+    rgb = image.astype(np.float32)
+    rgb = np.nan_to_num(rgb, nan=0.0, posinf=0.0, neginf=0.0)
+    rgb = np.clip(rgb / _ACTIVE["rgb_divisor"], 0.0, 1.0)
+    rgb = (rgb - _ACTIVE["mean"]) / _ACTIVE["std"]
 
-    # HWC -> CHW
-    image_tensor = torch.from_numpy(image).permute(2, 0, 1).contiguous()
+    x = torch.from_numpy(
+        np.ascontiguousarray(rgb.transpose(2, 0, 1))
+    ).unsqueeze(0)
 
-    image_tensor = image_tensor.float()
-
-    # Same normalization as training
-    if image_tensor.max() > 1.5:
-        image_tensor = image_tensor / 255.0
-
-    # Add batch dimension
-    image_tensor = image_tensor.unsqueeze(0)
-
-    # Resize to training input size
-    image_tensor = F.interpolate(
-        image_tensor,
-        size=(INPUT_SIZE, INPUT_SIZE),
-        mode="bilinear",
-        align_corners=False,
-    )
-
-    return image_tensor
+    return x
 
 
 # ============================================================
-# MODEL INFERENCE
+# TILED INFERENCE
 # ============================================================
 
+def _tile_starts(length, tile, stride):
+    if length <= tile:
+        return [0]
+    return sorted(set(list(range(0, length - tile + 1, stride)) + [length - tile]))
 
-def predict(model, image, scale, shift):
-    """
-    Run GAMUS fine-tuned depth inference.
 
-    Returns:
-        AGL map at original image resolution.
-    """
+def _amp_context():
+    if DEVICE != "cuda":
+        return nullcontext()
 
-    original_height, original_width = image.shape[:2]
+    major, _ = torch.cuda.get_device_capability(0)
+    native_bf16 = major >= 8 and torch.cuda.is_bf16_supported()
+    dtype = torch.bfloat16 if native_bf16 else torch.float16
 
-    input_tensor = preprocess(image)
-    input_tensor = input_tensor.to(DEVICE)
+    return torch.amp.autocast("cuda", dtype=dtype)
 
-    with torch.inference_mode():
-        # Depth Anything V2 forward pass
-        prediction = model(input_tensor)
 
-        # Handle possible output formats
-        if isinstance(prediction, dict):
-            if "pred" in prediction:
-                prediction = prediction["pred"]
+@torch.inference_mode()
+def _predict_native_tiled(model, image):
+    transform = _ACTIVE["transform"]
+    mean = _ACTIVE["mean"]
+    std = _ACTIVE["std"]
+    tile = int(_ACTIVE["crop_size"])
+    overlap = float(_ACTIVE["overlap"])
+    rgb_divisor = float(_ACTIVE["rgb_divisor"])
+    tta = bool(_ACTIVE["tta"])
 
-            elif "depth" in prediction:
-                prediction = prediction["depth"]
+    if not (0 <= overlap < 0.75):
+        raise ValueError("TILE_OVERLAP must be in [0, 0.75).")
 
-            else:
-                raise RuntimeError(
-                    "Model returned a dictionary but no "
-                    "'pred' or 'depth' key was found."
-                )
+    rgb = image.astype(np.float32)
+    rgb = np.nan_to_num(rgb, nan=0.0, posinf=0.0, neginf=0.0)
 
-        elif isinstance(prediction, (tuple, list)):
-            prediction = prediction[0]
-
-        # Make sure output is 4D
-        if prediction.ndim == 3:
-            prediction = prediction.unsqueeze(1)
-
-        elif prediction.ndim == 2:
-            prediction = prediction.unsqueeze(0).unsqueeze(0)
-
-        # Resize prediction to original image size
-        prediction = F.interpolate(
-            prediction,
-            size=(original_height, original_width),
-            mode="bilinear",
-            align_corners=False,
+    observed_max = float(np.max(rgb)) if rgb.size else 0.0
+    if observed_max > rgb_divisor * 1.5:
+        print(
+            f"WARNING: input RGB max={observed_max:.1f} is much larger than "
+            f"saved RGB_DIVISOR={rgb_divisor}. Check the image radiometric scale."
         )
 
-        prediction = prediction.squeeze()
+    rgb = np.clip(rgb / rgb_divisor, 0.0, 1.0)
 
-        # Apply learned GAMUS scale and shift
-        prediction = prediction * scale + shift
+    h, w = rgb.shape[:2]
+    stride = max(1, round(tile * (1.0 - overlap)))
 
-        prediction = prediction.cpu().numpy()
+    hann = np.maximum(np.hanning(tile).astype(np.float32), 0.025)
+    weight = hann[:, None] * hann[None, :]
 
-    return prediction.astype(np.float32)
+    output = np.zeros((h, w), dtype=np.float32)
+    denominator = np.zeros((h, w), dtype=np.float32)
+
+    operations = [(0, None)]
+    if tta:
+        operations = [
+            (0, None),
+            (0, -1),
+            (0, -2),
+            (1, None),
+            (2, None),
+            (3, None),
+        ]
+
+    for top in _tile_starts(h, tile, stride):
+        for left in _tile_starts(w, tile, stride):
+            patch = rgb[top:top + tile, left:left + tile]
+            ph, pw = patch.shape[:2]
+
+            patch = np.pad(
+                patch,
+                ((0, tile - ph), (0, tile - pw), (0, 0)),
+                mode="edge",
+            )
+
+            patch = (patch - mean) / std
+
+            x = torch.from_numpy(
+                np.ascontiguousarray(patch.transpose(2, 0, 1))
+            ).unsqueeze(0).to(DEVICE)
+
+            prediction = torch.zeros(
+                (1, 1, tile, tile),
+                dtype=torch.float32,
+                device=DEVICE,
+            )
+
+            for rotation, flip in operations:
+                view = torch.rot90(x, rotation, (-2, -1))
+
+                if flip is not None:
+                    view = view.flip(flip)
+
+                with _amp_context():
+                    latent = model(view)
+
+                height = _decode_height(latent, transform)
+
+                if flip is not None:
+                    height = height.flip(flip)
+
+                height = torch.rot90(height, -rotation, (-2, -1))
+                prediction += height / len(operations)
+
+            arr = prediction[0, 0, :ph, :pw].cpu().numpy()
+
+            output[top:top + ph, left:left + pw] += arr * weight[:ph, :pw]
+            denominator[top:top + ph, left:left + pw] += weight[:ph, :pw]
+
+    if not (denominator > 0).all():
+        raise RuntimeError("Tiled inference left uncovered pixels.")
+
+    return (output / denominator).astype(np.float32)
 
 
 # ============================================================
-# SAVE AGL
+# PREDICT — OLD API PRESERVED
 # ============================================================
 
+def predict(model, image, scale=1.0, shift=0.0):
+    """
+    Backward-compatible signature used by the existing run_pipeline.py.
+
+    scale/shift are intentionally ignored for the new DepthWizard artifact,
+    because its saved target transform is applied internally.
+    """
+    return _predict_native_tiled(model, image)
+
+
+# ============================================================
+# SAVE AGL — OLD API PRESERVED
+# ============================================================
 
 def save_agl(agl, output_path, metadata=None):
-    """
-    Save predicted AGL.
-
-    If metadata is available from a GeoTIFF input,
-    preserve its geospatial information.
-
-    Otherwise save a normal single-band float32 TIFF.
-    """
-
     os.makedirs(
         os.path.dirname(output_path) if os.path.dirname(output_path) else ".",
         exist_ok=True,
@@ -332,7 +452,6 @@ def save_agl(agl, output_path, metadata=None):
 
     if metadata is not None:
         profile = metadata.copy()
-
         profile.update(
             {
                 "driver": "GTiff",
@@ -343,7 +462,6 @@ def save_agl(agl, output_path, metadata=None):
                 "compress": "lzw",
             }
         )
-
     else:
         profile = {
             "driver": "GTiff",
@@ -355,14 +473,9 @@ def save_agl(agl, output_path, metadata=None):
         }
 
     with rasterio.open(output_path, "w", **profile) as dst:
-        dst.write(agl, 1)
+        dst.write(agl.astype(np.float32), 1)
 
     print("Saved AGL GeoTIFF:", output_path)
-
-
-# ============================================================
-# SAVE NUMPY
-# ============================================================
 
 
 def save_numpy(agl, output_path):
@@ -371,22 +484,17 @@ def save_numpy(agl, output_path):
         exist_ok=True,
     )
 
-    np.save(output_path, agl)
-
+    np.save(output_path, agl.astype(np.float32))
     print("Saved NumPy output:", output_path)
 
 
 # ============================================================
-# MAIN
+# STANDALONE MAIN
 # ============================================================
 
-
 def main():
-
     parser = argparse.ArgumentParser(
-        description=(
-            "Run GAMUS fine-tuned Depth Anything V2 inference and generate an AGL map."
-        )
+        description="Run DepthWizard GAMUS DA-V2-S inference."
     )
 
     parser.add_argument("input", help="Input JPG, PNG or GeoTIFF")
@@ -395,53 +503,22 @@ def main():
         "-o",
         "--output",
         default="outputs/depth/predicted_agl.tif",
-        help="Output AGL GeoTIFF path",
+        help="Output AGL TIFF path",
     )
 
     parser.add_argument("--npy", default=None, help="Optional NumPy output path")
 
     args = parser.parse_args()
 
-    print()
-    print("=" * 60)
-    print("GAMUS DEPTH INFERENCE")
-    print("=" * 60)
-    print()
-
-    # --------------------------------------------------------
-    # Load model
-    # --------------------------------------------------------
-
     model, scale, shift = load_model()
-
-    # --------------------------------------------------------
-    # Load image
-    # --------------------------------------------------------
-
-    print("Loading image:")
-    print(args.input)
-    print()
 
     image, metadata = load_image(args.input)
 
     print("Image shape:", image.shape)
-
     print("Image dtype:", image.dtype)
-
-    print()
-
-    # --------------------------------------------------------
-    # Predict
-    # --------------------------------------------------------
-
     print("Running inference...")
 
     agl = predict(model, image, scale, shift)
-
-    print()
-    print("=" * 60)
-    print("PREDICTION")
-    print("=" * 60)
 
     print("AGL shape:", agl.shape)
     print("AGL dtype:", agl.dtype)
@@ -449,23 +526,12 @@ def main():
     print("AGL max:", float(np.nanmax(agl)))
     print("AGL mean:", float(np.nanmean(agl)))
 
-    # --------------------------------------------------------
-    # Save GeoTIFF
-    # --------------------------------------------------------
-
     save_agl(agl, args.output, metadata)
-
-    # --------------------------------------------------------
-    # Optional NumPy
-    # --------------------------------------------------------
 
     if args.npy is not None:
         save_numpy(agl, args.npy)
 
-    print()
-    print("=" * 60)
-    print("INFERENCE COMPLETE")
-    print("=" * 60)
+    print("Inference complete.")
 
 
 if __name__ == "__main__":
