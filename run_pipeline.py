@@ -491,23 +491,106 @@ def align_dem_to_agl(dem_path: Path, agl_path: Path, output_path: Path):
 # ============================================================
 
 def save_texture(image_rgb: np.ndarray, output_path: Path):
-    if image_rgb.dtype != np.uint8:
-        arr = image_rgb.astype(np.float32)
-        finite = np.isfinite(arr)
+    """
+    Save an RGB image as a browser-friendly PNG.
 
-        if finite.any():
-            lo = float(np.nanpercentile(arr, 2))
-            hi = float(np.nanpercentile(arr, 98))
+    Handles:
+    - H x W x 3
+    - 3 x H x W
+    - uint8
+    - uint16
+    - float images in 0..1
+    - float reflectance / Sentinel values
+    """
 
-            if hi > lo:
-                arr = (arr - lo) / (hi - lo) * 255.0
+    arr = np.asarray(image_rgb)
 
-        image_rgb = np.clip(arr, 0, 255).astype(np.uint8)
+    # ---------------------------------------------------------
+    # Convert CHW -> HWC if necessary
+    # ---------------------------------------------------------
+    if arr.ndim == 3 and arr.shape[0] == 3 and arr.shape[-1] != 3:
+        arr = np.transpose(arr, (1, 2, 0))
 
-    bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+    if arr.ndim != 3 or arr.shape[-1] != 3:
+        raise ValueError(
+            f"Expected RGB image with shape HxWx3 or 3xHxW, "
+            f"got {arr.shape}"
+        )
 
-    if not cv2.imwrite(str(output_path), bgr):
-        raise RuntimeError(f"Could not write texture: {output_path}")
+    arr = arr.astype(np.float32)
+
+    # ---------------------------------------------------------
+    # Replace invalid values
+    # ---------------------------------------------------------
+    finite = np.isfinite(arr)
+
+    if not finite.any():
+        raise ValueError("RGB texture contains no finite pixels.")
+
+    arr[~finite] = 0
+
+    # ---------------------------------------------------------
+    # Normalize RGB independently
+    # ---------------------------------------------------------
+    output = np.zeros_like(arr, dtype=np.uint8)
+
+    for channel in range(3):
+
+        band = arr[:, :, channel]
+
+        valid = np.isfinite(band)
+
+        if not valid.any():
+            continue
+
+        lo = float(np.nanpercentile(band[valid], 2))
+        hi = float(np.nanpercentile(band[valid], 98))
+
+        if hi > lo:
+            normalized = (
+                (band - lo) /
+                (hi - lo)
+            )
+
+            normalized = np.clip(
+                normalized,
+                0.0,
+                1.0
+            )
+
+            output[:, :, channel] = (
+                normalized * 255.0
+            ).astype(np.uint8)
+
+        else:
+            output[:, :, channel] = 0
+
+    # ---------------------------------------------------------
+    # RGB -> BGR for OpenCV
+    # ---------------------------------------------------------
+    bgr = cv2.cvtColor(
+        output,
+        cv2.COLOR_RGB2BGR
+    )
+
+    if not cv2.imwrite(
+        str(output_path),
+        bgr
+    ):
+        raise RuntimeError(
+            f"Could not write texture: {output_path}"
+        )
+
+    print(
+        f"[ OK ] RGB texture saved: {output_path}"
+    )
+
+    print(
+        f"      shape={output.shape}, "
+        f"min={output.min()}, "
+        f"max={output.max()}, "
+        f"mean={output.mean():.2f}"
+    )
 
 
 def save_heightmap_png(heightmap: np.ndarray, output_path: Path):
@@ -611,9 +694,20 @@ def process_sentinel_zip(input_path: Path, run_dir: Path, started: str):
         str(depth_npy),
     )
 
+    # --------------------------------------------------------
+# RGB TEXTURE
+# Use the actual Sentinel B04/B03/B02 GeoTIFF
+# instead of the model-preprocessed image.
+# --------------------------------------------------------
+
+    with rasterio.open(rgb_tif) as src:
+        rgb_texture = src.read(
+            [1, 2, 3]
+        ).astype(np.float32)
+
     save_texture(
-        image_rgb,
-        run_dir / "texture.png",
+    rgb_texture,
+    run_dir / "texture.png",
     )
 
     # --------------------------------------------------------
@@ -1007,7 +1101,74 @@ def process_regular_image(input_path: Path, run_dir: Path, started: str):
 
     return metadata
 
+def run_pipeline(input_path):
+   
+    input_path = Path(input_path).expanduser().resolve()
 
+    if not input_path.exists():
+        raise FileNotFoundError(
+            f"Input file does not exist: {input_path}"
+        )
+
+    run_dir = make_run_dir()
+    started = datetime.now().isoformat()
+
+    print("=" * 73)
+    print("SIH 26175 TERRAIN PIPELINE")
+    print("=" * 73)
+
+    print(f"\nInput:\n  {input_path}")
+    print(f"\nNew output run:\n  {run_dir}")
+
+    try:
+        if input_path.suffix.lower() == ".zip":
+            metadata = process_sentinel_zip(
+                input_path,
+                run_dir,
+                started,
+            )
+        else:
+            metadata = process_regular_image(
+                input_path,
+                run_dir,
+                started,
+            )
+
+    except Exception:
+        try:
+            (run_dir / "FAILED.txt").write_text(
+                "Pipeline failed. See terminal traceback.\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+        raise
+
+    print("\n" + "=" * 73)
+    print("PIPELINE COMPLETE")
+    print("=" * 73)
+
+    print(f"Input type : {metadata.get('input_type')}")
+    print(f"Size       : {metadata.get('width')} x {metadata.get('height')}")
+    print(f"Output     : {run_dir}")
+
+    # Safety check
+    heightmap_path = run_dir / "heightmap.npy"
+
+    if not heightmap_path.exists():
+        raise RuntimeError(
+            f"Current run did not generate heightmap.npy:\n{run_dir}"
+        )
+
+    # Launch 3D visualizer for THIS run
+    print("\nLaunching 3D reconstruction for THIS run...")
+
+    return {
+        "metadata": metadata,
+        "run_dir": str(run_dir),
+        "output_directory": str(run_dir),
+    }
 # ============================================================
 # MAIN
 # ============================================================
