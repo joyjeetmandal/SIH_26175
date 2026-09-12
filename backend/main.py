@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+import numpy as np
 import tempfile
 import sys
 
@@ -66,41 +67,85 @@ def health():
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-
-    # Read uploaded image
     image_bytes = await file.read()
-
-    # Keep the original extension
     suffix = Path(file.filename).suffix
 
-    # Create temporary file
-    with tempfile.NamedTemporaryFile(
-        delete=False,
-        suffix=suffix
-    ) as temp_file:
-
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
         temp_file.write(image_bytes)
         temp_path = Path(temp_file.name)
 
     try:
-
         print("\n==============================")
         print("Received file:", file.filename)
         print("Temporary file:", temp_path)
         print("==============================")
 
+        # Run the AI terrain pipeline
         result = run_pipeline(temp_path)
 
         print("\nAI pipeline finished!")
+        print("Pipeline result:", result)
 
-        run_dir = Path(result["run_dir"])
-        heightmap_path = Path(result["heightmap"])
-        texture_path = Path(result["texture"])
-        metadata_path = Path(result["metadata"])
+        # --------------------------------------------------
+        # Find the output directory
+        # --------------------------------------------------
+
+        if "run_dir" in result:
+            run_dir = Path(result["run_dir"])
+
+        elif (
+            "pipeline" in result
+            and "output_directory" in result["pipeline"]
+        ):
+            run_dir = Path(result["pipeline"]["output_directory"])
+
+        else:
+            raise RuntimeError(
+                f"Pipeline completed but no output directory was returned. "
+                f"Result keys: {list(result.keys())}"
+            )
+
+        # --------------------------------------------------
+        # Expected output files
+        # --------------------------------------------------
+
+        heightmap_path = run_dir / "heightmap.png"
+        texture_path = run_dir / "texture.png"
+        metadata_path = run_dir / "metadata.json"
+        heightmap_npy_path = run_dir / "heightmap.npy"
+        
+        heightmap_data = np.load(heightmap_npy_path).astype(np.float32).tolist()
+
+        # --------------------------------------------------
+        # Verify files exist
+        # --------------------------------------------------
+
+        if not heightmap_path.exists():
+            raise RuntimeError(
+                f"Heightmap not found: {heightmap_path}"
+            )
+
+        if not texture_path.exists():
+            raise RuntimeError(
+                f"Texture not found: {texture_path}"
+            )
+
+        if not metadata_path.exists():
+            raise RuntimeError(
+                f"Metadata not found: {metadata_path}"
+            )
 
         run_folder = run_dir.name
 
-        # Send results back to React
+        print("\nGenerated files:")
+        print("  Heightmap:", heightmap_path)
+        print("  Texture:", texture_path)
+        print("  Metadata:", metadata_path)
+
+        # --------------------------------------------------
+        # Send URLs to React
+        # --------------------------------------------------
+
         return {
             "success": True,
             "filename": file.filename,
@@ -108,21 +153,19 @@ async def predict(file: UploadFile = File(...)):
                 "run_dir": run_folder,
                 "heightmap": f"/outputs/{run_folder}/{heightmap_path.name}",
                 "texture": f"/outputs/{run_folder}/{texture_path.name}",
-                "metadata": f"/outputs/{run_folder}/{metadata_path.name}"
-            }
+                "metadata": f"/outputs/{run_folder}/{metadata_path.name}",
+                "heightmap_data": heightmap_data,
+            },
         }
 
     except Exception as exc:
-
         print(f"\nPipeline error: {exc}")
 
         return {
             "success": False,
-            "error": str(exc)
+            "error": str(exc),
         }
 
     finally:
-
-        # Delete temporary uploaded image
         if temp_path.exists():
             temp_path.unlink()
